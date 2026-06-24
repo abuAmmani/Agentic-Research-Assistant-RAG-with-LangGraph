@@ -1,0 +1,115 @@
+from langchain.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+loader = PyPDFLoader("sample_ai_ethics.pdf")
+docs = loader.load()
+
+splitter = RecursiveCharacterTextSplitter(
+    chunk_size=500,
+    chunk_overlap=50
+)
+
+chunks = splitter.split_documents(docs)
+
+print(f"Total chunks: {len(chunks)}")
+
+  from langchain_openai import OpenAIEmbeddings
+from langchain.vectorstores import Chroma
+
+embedding_model = OpenAIEmbeddings()
+
+vectorstore = Chroma.from_documents(
+    documents=chunks,
+    embedding=embedding_model,
+    persist_directory="./chroma_db"
+)
+
+vectorstore.persist()
+
+  from langchain.tools import tool
+
+@tool
+def knowledge_base_search(query: str):
+    docs = vectorstore.similarity_search(query, k=3)
+    return "\n".join([doc.page_content for doc in docs])
+
+  from pydantic import BaseModel
+from typing import List, Optional
+
+class State(BaseModel):
+    user_input: str
+    history: List[str] = []
+    tool_output: Optional[str] = None
+
+  from langchain_openai import ChatOpenAI
+
+llm = ChatOpenAI(model="gpt-4")
+
+SYSTEM_PROMPT = """
+You are an intelligent research assistant.
+
+Rules:
+1. Only use retrieved context when needed.
+2. If the question is simple, answer directly.
+3. If tool context is insufficient, say "I don't know."
+4. Never hallucinate.
+"""
+
+def agent_node(state):
+    response = llm.invoke(
+        SYSTEM_PROMPT + "\nQuestion: " + state.user_input
+    )
+    return {"history": state.history + [response.content]}
+
+def tool_node(state):
+    result = knowledge_base_search.invoke(state.user_input)
+    return {"tool_output": result}
+
+def tools_condition(state):
+    trivial_questions = ["2+2", "hello", "hi"]
+
+    if state.user_input.lower() in trivial_questions:
+        return "direct"
+    return "search"
+
+  from langgraph.graph import StateGraph, END
+
+workflow = StateGraph(State)
+
+workflow.add_node("agent", agent_node)
+workflow.add_node("tool", tool_node)
+
+workflow.set_entry_point("agent")
+
+workflow.add_conditional_edges(
+    "agent",
+    tools_condition,
+    {
+        "direct": END,
+        "search": "tool"
+    }
+)
+
+workflow.add_edge("tool", END)
+
+graph = workflow.compile()
+
+  query = State(
+    user_input="What are the three main risks of bias mentioned in the document?"
+)
+
+result = graph.invoke(query)
+
+print(result)
+
+query = State(
+    user_input="What is 2+2?"
+)
+
+result = graph.invoke(query)
+
+print(result)
+
+from IPython.display import Image, display
+
+display(Image(graph.get_graph().draw_mermaid_png()))
